@@ -247,17 +247,34 @@ def fileSize(paths):
 """
 
 
-def splitPipes(_stdin):
+def splitCmds(s, sep):
+    parts = []
+    buf = []
+    in_quotes = False
+    for char in s:
+        if char == '"':
+            in_quotes = not in_quotes
+            buf.append(char)
+        elif char == sep and not in_quotes:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(char)
+    parts.append("".join(buf))
+    return parts
+
+
+def groupCmds(s, sep):
     result = []
     rawPipe = ""
-    for cmd in _stdin.split(" | "):
+    for cmd in splitCmds(s, sep):
         if cmd.split()[0] in builtins():
             if rawPipe:
                 result.append(rawPipe)
                 rawPipe = ""
             result.append(cmd)
         else:
-            rawPipe += " | " + cmd if rawPipe else cmd
+            rawPipe += sep + cmd if rawPipe else cmd
     if rawPipe:
         result.append(rawPipe)
     return result
@@ -447,7 +464,7 @@ def main():
 
         try:
             outList = []
-            cmds = splitPipes(_stdin)
+            cmds = groupCmds(_stdin, "|")
             for cmd in cmds:
                 if not outList:
                     out = execSh(cmd, env)
