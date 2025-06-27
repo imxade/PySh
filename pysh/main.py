@@ -22,12 +22,11 @@ def save(data, file, mode):
     return 1
 
 
-def _out(_stdout, tup):
-    out, err = tup
+def _out(_stdout, out, err):
     if not _stdout:
-        return out + err
+        return f"{out}\n{err}"
     elif "&" in _stdout[0]:
-        data = out + err
+        data = f"{out}\n{err}"
         ret = ""
     elif "2" in _stdout[0]:
         data = err
@@ -49,6 +48,7 @@ def findExe(arg, env):
 
 def chkType(args, env):
     result = []
+    err = []
     for arg in args:
         binPath = findExe(arg, env)
         if arg in builtins():
@@ -56,8 +56,8 @@ def chkType(args, env):
         elif binPath:
             result.append(f"{arg} is {binPath}")
         else:
-            result.append(f"{arg}: not found")
-    return "\n".join(result), ""
+            err.append(f"{arg}: not found")
+    return "\n".join(result), "\n".join(err)
 
 
 def cd(args):
@@ -339,7 +339,7 @@ def unset(args, env):
     return "", ""
 
 
-def showEnv(args, env):
+def showEnv(env):
     result = "\n".join(f"{k}={v}" for k, v in env.items())
     return result + "\n", ""
 
@@ -392,7 +392,7 @@ def execSh(_stdin, env=None, pipe=""):
     command, *args = tokenize(substituteVars(_stdin, env))
     args, _stdout = parseRedirection(args)
     if command in builtins():
-        return builtins(_stdout, env)[command](args)
+        return _stdout, *builtins(_stdout, env)[command](args)
         # return builtins(_stdout)[command](args + tokenize(pipe) if pipe else args)
     if command not in allCmds():
         return None
@@ -407,7 +407,7 @@ def execSh(_stdin, env=None, pipe=""):
         out = f.read()
     with open(errLog, "r") as f:
         err = f.read()
-    return _out(_stdout, (out, err))
+    return _stdout, out, err
 
 
 def execPython(_stdin, env):
@@ -420,16 +420,14 @@ def execPython(_stdin, env):
 
 def builtins(_stdout=None, env=None):
     return {
-        "exit": lambda args: _out(_stdout, _exit(int(args[0]) if args else 0, env)),
-        "type": lambda args: _out(_stdout, chkType(args, env)),
-        "echo": lambda args: _out(
-            _stdout, (" ".join(args) + "\n" if _stdout else " ".join(args), "")
-        ),
-        "pwd": lambda args: _out(_stdout, (os.getcwd(), "")),
-        "cd": lambda args: _out(_stdout, cd(args)),
-        "history": lambda args: _out(_stdout, _history(args, env)),
-        "unset": lambda args: _out(_stdout, unset(args, env)),
-        "set": lambda args: _out(_stdout, showEnv(args, env)),
+        "exit": lambda args: _exit(int(args[0]) if args else 0, env),
+        "type": lambda args: chkType(args, env),
+        "echo": lambda args: (" ".join(args) + "\n" if _stdout else " ".join(args), ""),
+        "pwd": lambda args: (os.getcwd(), ""),
+        "cd": lambda args: cd(args),
+        "history": lambda args: _history(args, env),
+        "unset": lambda args: unset(args, env),
+        "env": lambda args: showEnv(env),
     }
 
 
@@ -468,7 +466,7 @@ def main():
                     break
                 else:
                     out = execSh(cmd, env, outList[-1])
-                outList.append(out)
+                outList.append(_out(*out))
             if outList and outList[-1] is not None:
                 if outList[-1] != "":
                     print(outList[-1].rstrip())
