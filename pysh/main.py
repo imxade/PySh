@@ -1,10 +1,13 @@
+#!/usr/bin/env python
+
+
 import os
 import readline
 
 
-def _exit(code):
+def _exit(code, env):
     try:
-        writeHistory()
+        writeHistory(env)
     except:
         pass
     try:
@@ -36,18 +39,18 @@ def _out(_stdout, tup):
     return ret
 
 
-def findExe(arg):
-    for path in exePaths().split(os.pathsep):
+def findExe(arg, env):
+    for path in exePaths(env).split(os.pathsep):
         binPath = os.path.join(path, arg)
         if os.access(binPath, os.X_OK):
             # Only first path # fix
             return binPath
 
 
-def chkType(args):
+def chkType(args, env):
     result = []
     for arg in args:
-        binPath = findExe(arg)
+        binPath = findExe(arg, env)
         if arg in builtins():
             result.append(f"{arg} is a shell builtin")
         elif binPath:
@@ -166,33 +169,59 @@ def tokenize(s):
     return result
 
 
-def exePaths():
-    # UNIX
-    result = os.getenv("PATH", "")
-    if result:
-        return result
-    # Windows
-    return os.getenv("Path", "")
+def exePaths(env):
+    return env.get("PATH") or env.get("Path", "")
+
+
+def getWindowsCmdlets():
+    cmdlets = set()
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                "Get-Command | Select-Object -ExpandProperty Name; "
+                "Get-Alias | Select-Object -ExpandProperty Name",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line:
+                    cmdlets.add(line)
+    except Exception:
+        pass
+    return cmdlets
 
 
 def allCmds():
+    if hasattr(allCmds, "cached"):
+        return allCmds.cached
+
     cmds = set(builtins().keys())
-    for path in exePaths().split(os.pathsep):
+    for path in exePaths(allCmds.env).split(os.pathsep):
         try:
             for f in os.listdir(path):
                 if os.access(os.path.join(path, f), os.X_OK):
                     cmds.add(f)
         except Exception:
-            pass
+            continue
+
+    if os.name == "nt":
+        cmds.update(getWindowsCmdlets())
+
+    allCmds.cached = cmds
     return cmds
 
 
-def completer(_in, index):
+def completer(text, state):
     # fix completion for paths
-    if not hasattr(completer, "cached"):
-        completer.cached = allCmds()
-    matches = [cmd for cmd in completer.cached if cmd.startswith(_in)]
-    return matches[index] + " " if index < len(matches) else None
+    matches = [cmd for cmd in allCmds() if cmd.startswith(text)]
+    return matches[state] + " " if state < len(matches) else None
 
 
 def customDisplay(substitution, matches, longest_match_length):
@@ -241,7 +270,7 @@ def splitLogicalOps
 """
 
 
-def _history(args):
+def _history(args, env):
     start = -1
     end = readline.get_current_history_length()
     if not args:
@@ -250,13 +279,13 @@ def _history(args):
         n = int(args[0])
         start = end - n if n > 0 and n < end else 0
     elif args[0] not in ["-r", "-w", "-a"] or len(args) > 2:
-        return "", "unexpected arguement"
+        return "", "unexpected argument"
     elif args[0] == "-r":
-        readHistory(args[1])
+        readHistory(env, args[1])
     elif args[0] == "-w":
-        writeHistory(args[1])
+        writeHistory(env, args[1])
     elif args[0] == "-a":
-        appendHistory(args[1])
+        appendHistory(env, args[1])
 
     if start == -1:
         return "", ""
@@ -271,35 +300,101 @@ def historyRange(start, end):
     return result, ""
 
 
-def readHistory(file=None):
+def readHistory(env, file=None):
     if not file:
-        file = os.getenv("HISTFILE")
+        file = env.get("HISTFILE")
     readline.read_history_file(file)
 
 
-def writeHistory(file=None):
+def writeHistory(env, file=None):
     if not file:
-        file = os.getenv("HISTFILE")
+        file = env.get("HISTFILE")
     readline.write_history_file(file)
 
 
-def appendHistory(file=None):
+def appendHistory(env, file=None):
     if not file:
-        file = os.getenv("HISTFILE")
+        file = env.get("HISTFILE")
     n = readline.get_current_history_length()
     readline.append_history_file(n - getattr(appendHistory, "last", 0), file)
     appendHistory.last = n
 
 
-def builtins(_stdout=None):
-    return {
-        "exit": lambda args: _out(_stdout, _exit(int(args[0]) if args else 0)),
-        "type": lambda args: _out(_stdout, chkType(args)),
-        "echo": lambda args: _out(_stdout, (" ".join(args) + "\n", "")),
-        "pwd": lambda args: _out(_stdout, (os.getcwd(), "")),
-        "cd": lambda args: _out(_stdout, cd(args)),
-        "history": lambda args: _out(_stdout, _history(args)),
-    }
+def unset(args, env):
+    for arg in args:
+        env.pop(arg, None)
+    return "", ""
+
+
+def showEnv(args, env):
+    result = "\n".join(f"{k}={v}" for k, v in env.items())
+    return result + "\n", ""
+
+
+def substituteVars(cmd, env):
+    result = ""
+    i = 0
+    while i < len(cmd):
+        if cmd[i] == "$":
+            if i + 1 < len(cmd) and cmd[i + 1] == "{":
+                j = i + 2
+                varName = ""
+                while j < len(cmd) and cmd[j] != "}":
+                    varName += cmd[j]
+                    j += 1
+                if j < len(cmd) and cmd[j] == "}":
+                    result += env.get(varName, "")
+                    i = j + 1
+                else:
+                    result += "$" + "{" + varName
+                    i = j
+            else:
+                j = i + 1
+                varName = ""
+                while j < len(cmd) and (cmd[j].isalnum() or cmd[j] == "_"):
+                    varName += cmd[j]
+                    j += 1
+                result += env.get(varName, "")
+                i = j
+        else:
+            result += cmd[i]
+            i += 1
+    return result
+
+
+def handleQuotes(args):
+    fullCmd = ""
+    if os.name == "nt":
+        fullCmd = "powershell "
+    for arg in args:
+        if len(arg.split()) > 1 and " | " not in arg:
+            fullCmd += f" '{arg}'"
+        else:
+            fullCmd += f" {arg}"
+    return fullCmd
+
+
+def execSh(_stdin, env=None, pipe=""):
+    # _stdin = _stdin.replace("tail -f", "tail")
+    command, *args = tokenize(substituteVars(_stdin, env))
+    args, _stdout = parseRedirection(args)
+    if command in builtins():
+        return builtins(_stdout, env)[command](args)
+        # return builtins(_stdout)[command](args + tokenize(pipe) if pipe else args)
+    if command not in allCmds():
+        return None
+    prefix = f"echo {pipe} | " if pipe else ""
+    homeDir = os.path.expanduser("~")
+    errLog = os.path.join(homeDir, ".stderr.log")
+    outLog = os.path.join(homeDir, ".stdout.log")
+    # size = fileSize(args)
+    cmd = f"{prefix} {handleQuotes((command, *args))} 2>{errLog} >{outLog}"
+    os.system(cmd)
+    with open(outLog, "r") as f:
+        out = f.read()
+    with open(errLog, "r") as f:
+        err = f.read()
+    return _out(_stdout, (out, err))
 
 
 def execPython(_stdin, env):
@@ -310,37 +405,30 @@ def execPython(_stdin, env):
         exec(_stdin, env)
 
 
-def execSh(_stdin, pipe=""):
-    # _stdin = _stdin.replace("tail -f", "tail")
-    command, *args = tokenize(_stdin)
-    args, _stdout = parseRedirection(args)
-    if command in builtins():
-        return builtins(_stdout)[command](args)
-        # return builtins(_stdout)[command](args + tokenize(pipe) if pipe else args)
-    elif findExe(command):
-        prefix = f"echo -ne {repr(pipe)} | " if pipe else ""
-        errLog = ".stderr.log"
-        outLog = ".stdout.log"
-        args = " ".join(args)
-        cmd = f"{prefix} '{command}' {args} 2>{errLog} >{outLog}"
-        # size = fileSize(args)
-        os.system(cmd)
-        with open(outLog, "r") as f:
-            out = f.read()
-        with open(errLog, "r") as f:
-            err = f.read()
-        return _out(_stdout, (out, err))
-    return None
+def builtins(_stdout=None, env=None):
+    return {
+        "exit": lambda args: _out(_stdout, _exit(int(args[0]) if args else 0, env)),
+        "type": lambda args: _out(_stdout, chkType(args, env)),
+        "echo": lambda args: _out(
+            _stdout, (" ".join(args) + "\n" if _stdout else " ".join(args), "")
+        ),
+        "pwd": lambda args: _out(_stdout, (os.getcwd(), "")),
+        "cd": lambda args: _out(_stdout, cd(args)),
+        "history": lambda args: _out(_stdout, _history(args, env)),
+        "unset": lambda args: _out(_stdout, unset(args, env)),
+        "set": lambda args: _out(_stdout, showEnv(args, env)),
+    }
 
 
 def main():
     # Retain values of variables in REPL
-    env = {}
+    env = os.environ.copy()
+    allCmds.env = env
     readline.set_completer(completer)
     # readline.set_completion_display_matches_hook(customDisplay)  # fix, unsupported on windows
     readline.parse_and_bind("tab: complete")
     try:
-        readHistory()
+        readHistory(env)
     except:
         pass
 
@@ -352,7 +440,7 @@ def main():
                 continue
         except EOFError:
             print()
-            _exit(0)
+            _exit(0, env)
         except:
             print()
             continue
@@ -362,11 +450,11 @@ def main():
             cmds = splitPipes(_stdin)
             for cmd in cmds:
                 if not outList:
-                    out = execSh(cmd)
+                    out = execSh(cmd, env)
                 elif outList[-1] is None:
                     break
                 else:
-                    out = execSh(cmd, outList[-1])
+                    out = execSh(cmd, env, outList[-1])
                 outList.append(out)
             if outList and outList[-1] is not None:
                 if outList[-1] != "":
@@ -386,4 +474,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
