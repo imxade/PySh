@@ -400,7 +400,7 @@ def execSh(_stdin, env=None, pipe=""):
         # return builtins(_stdout)[command](args + tokenize(pipe) if pipe else args)
     if command not in allCmds():
         return None
-    prefix = f"echo {pipe} | " if pipe else ""
+    prefix = f"echo '{pipe}' | " if pipe else ""
     homeDir = os.path.expanduser("~")
     errLog = os.path.join(homeDir, ".stderr.log")
     outLog = os.path.join(homeDir, ".stdout.log")
