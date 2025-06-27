@@ -243,6 +243,113 @@ def fileSize(paths):
 """
 
 
+def readMultilineInput(prompt="$ "):
+    lines, stack = [], []
+    quote, colon, logicOp = None, False, False
+    pairs = {"(": ")", "{": "}", "[": "]"}
+
+    while True:
+        line = input(prompt if not lines else "> ")
+        lines.append(line)
+        stripped = line.rstrip()
+
+        # Handle colon block: require 2 blank lines after ":"
+        # On top, to stay unaffected by other continuations
+        if colon:
+            if stripped == "":
+                break
+            else:
+                continue
+
+        # Line continuation
+        if stripped.endswith("\\"):
+            lines[-1] = stripped[:-1]
+            continue
+
+        # Quote tracking with escape
+        i = 0
+        while i < len(line):
+            c = line[i]
+            esc = i > 0 and line[i - 1] == "\\"
+            if quote:
+                if c == quote and not esc:
+                    quote = None
+            elif c in {"'", '"', "`"} and not esc:
+                quote = c
+            i += 1
+
+        # Bracket balance
+        for c in line:
+            if c in pairs:
+                stack.append(pairs[c])
+            elif c in pairs.values() and stack and c == stack[-1]:
+                stack.pop()
+
+        # Continue if open quotes or brackets, others dont matter (Highest Priority)
+        if quote or stack:
+            continue
+
+        # Continue if logic operators
+        if stripped.endswith(("|", "&&")):
+            logicOp = True
+        elif logicOp and stripped != "":
+            break
+        if logicOp:
+            continue
+
+        # Continue if colon
+        if stripped.endswith(":"):
+            colon = True
+            continue
+
+        break
+
+    return "\n".join(lines)
+
+
+def splitLogicalOps(cmdLine):
+    ops = {"&&", "||", "&"}
+    result = []
+    current = ""
+    i = 0
+    quote = None
+
+    while i < len(cmdLine):
+        c = cmdLine[i]
+
+        # Quote tracking
+        if quote:
+            current += c
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        elif c in {"'", '"'}:
+            quote = c
+            current += c
+            i += 1
+            continue
+
+        # Check for operators only if outside quotes
+        if cmdLine[i : i + 2] in {"&&", "||"}:
+            result.append((current.strip(), cmdLine[i : i + 2]))
+            current = ""
+            i += 2
+            continue
+        elif c == "&":
+            result.append((current.strip(), "&"))
+            current = ""
+            i += 1
+            continue
+
+        current += c
+        i += 1
+
+    if current.strip():
+        result.append((current.strip(), None))
+    return result
+
+
 def splitCmds(s, sep):
     parts = []
     buf = []
@@ -392,7 +499,9 @@ def execSh(_stdin, env=None, pipe=""):
     command, *args = tokenize(substituteVars(_stdin, env))
     args, _stdout = parseRedirection(args)
     if command in builtins():
-        return _stdout, *builtins(_stdout, env)[command](args)
+        result = builtins(_stdout, env)[command](args)
+        exitCode = 0 if result[-1] == "" else 1
+        return exitCode, _stdout, *result
         # return builtins(_stdout)[command](args + tokenize(pipe) if pipe else args)
     if command not in allCmds():
         return None
@@ -402,12 +511,12 @@ def execSh(_stdin, env=None, pipe=""):
     outLog = os.path.join(homeDir, ".stdout.log")
     # size = fileSize(args)
     cmd = f"{prefix} {handleQuotes((command, *args))} 2>{errLog} >{outLog}"
-    os.system(cmd)
+    exitCode = os.system(cmd)
     with open(outLog, "r") as f:
         out = f.read()
     with open(errLog, "r") as f:
         err = f.read()
-    return _stdout, out, err
+    return exitCode, _stdout, out, err
 
 
 def execPython(_stdin, env):
@@ -446,7 +555,8 @@ def main():
     while True:
 
         try:
-            _stdin = input("$ ")  # fix add multiline support
+            # _stdin = input("$ ")  # fix add multiline support
+            _stdin = readMultilineInput()
             if not _stdin.strip():
                 continue
         except EOFError:
@@ -457,20 +567,47 @@ def main():
             continue
 
         try:
-            outList = []
-            cmds = groupCmds(_stdin, "|")
-            for cmd in cmds:
-                if not outList:
-                    out = execSh(cmd, env)
-                elif outList[-1] is None:
-                    break
+            runNext = True
+
+            for i, (chunk, op) in enumerate(splitLogicalOps(_stdin)):
+                if not runNext:
+                    if op == "&":
+                        continue  # background, no-op
+                    else:
+                        break
+
+                outList = []
+                for j, cmd in enumerate(groupCmds(chunk, "|")):
+                    if not outList:
+                        out = execSh(cmd, env)
+                    elif outList[-1] is None:
+                        break
+                    else:
+                        out = execSh(cmd, env, outList[-1])
+                    outList.append(_out(*out[1:]) if out else None)
+
+                # Print output of last command
+                if outList and outList[-1] is not None:
+                    lastOut = outList[-1].rstrip()
+                    if lastOut:
+                        print(lastOut)
+
+                if out is not None:
+                    success = not out[0]
                 else:
-                    out = execSh(cmd, env, outList[-1])
-                outList.append(_out(*out))
-            if outList and outList[-1] is not None:
-                if outList[-1] != "":
-                    print(outList[-1].rstrip())
-                continue
+                    success = False
+
+                # Handle logic
+                if op == "&&":
+                    runNext = success
+                elif op == "||":
+                    runNext = not success
+                elif op == "&":
+                    runNext = True
+
+            if out is not None:
+                continue  # skip Python
+
         except Exception as e:
             print(e)
             continue
