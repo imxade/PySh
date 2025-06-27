@@ -23,10 +23,11 @@ def save(data, file, mode):
 
 
 def _out(_stdout, out, err):
+    ret = out + err
     if not _stdout:
-        return f"{out}\n{err}"
+        return ret
     elif "&" in _stdout[0]:
-        data = f"{out}\n{err}"
+        data = ret
         ret = ""
     elif "2" in _stdout[0]:
         data = err
@@ -57,7 +58,10 @@ def chkType(args, env):
             result.append(f"{arg} is {binPath}")
         else:
             err.append(f"{arg}: not found")
-    return "\n".join(result), "\n".join(err)
+    out, err = "\n".join(result), "\n".join(err)
+    out += "\n" if out else ""
+    err += "\n" if err else ""
+    return out, err
 
 
 def cd(args):
@@ -531,8 +535,8 @@ def builtins(_stdout=None, env=None):
     return {
         "exit": lambda args: _exit(int(args[0]) if args else 0, env),
         "type": lambda args: chkType(args, env),
-        "echo": lambda args: (" ".join(args) + "\n" if _stdout else " ".join(args), ""),
-        "pwd": lambda args: (os.getcwd(), ""),
+        "echo": lambda args: (" ".join(args) + "\n", ""),
+        "pwd": lambda args: (os.getcwd() + "\n", ""),
         "cd": lambda args: cd(args),
         "history": lambda args: _history(args, env),
         "unset": lambda args: unset(args, env),
@@ -588,7 +592,7 @@ def main():
 
                 # Print output of last command
                 if outList and outList[-1] is not None:
-                    lastOut = outList[-1].rstrip()
+                    lastOut = outList[-1][:-1]
                     if lastOut:
                         print(lastOut)
 
