@@ -40,7 +40,7 @@ def _out(_stdout, tup):
 
 
 def findExe(arg, env):
-    for path in exePaths(env).split(os.pathsep):
+    for path in allCmds.env.get("PATH", "").split(os.pathsep):
         binPath = os.path.join(path, arg)
         if os.access(binPath, os.X_OK):
             # Only first path # fix
@@ -169,10 +169,6 @@ def tokenize(s):
     return result
 
 
-def exePaths(env):
-    return env.get("PATH") or env.get("Path", "")
-
-
 def getWindowsCmdlets():
     cmdlets = set()
     try:
@@ -203,7 +199,7 @@ def allCmds():
         return allCmds.cached
 
     cmds = set(builtins().keys())
-    for path in exePaths(allCmds.env).split(os.pathsep):
+    for path in allCmds.env.get("PATH", "").split(os.pathsep):
         try:
             for f in os.listdir(path):
                 if os.access(os.path.join(path, f), os.X_OK):
