@@ -17,4 +17,7 @@ setup(
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',
     ],
+    install_requires=[
+        "pyreadline3; platform_system=='Windows'",
+    ],
 )
