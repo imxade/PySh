@@ -91,7 +91,7 @@ def parseRedirection(args):
             "2>|",
             "2>>",
             "&>",
-        ]:
+        ]:  # fix with regex
             return args[:i], (args[i], args[i + 1])
     return args, None
 
@@ -184,14 +184,9 @@ def getWindowsCmdlets(env=None):
     )
     command = f'powershell -Command "{powershell_cmd}"'
 
-    result = subprocess.run(
-        ["powershell", "-Command", powershell_cmd],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
+    code, _, out, err = execChunk(command, env, checkAllCmds=False)
+    if code == 0:
+        for line in out.splitlines():
             line = line.strip()
             if line:
                 cmdlets.add(line)
@@ -461,7 +456,7 @@ def substituteVars(cmd, env):
     return result
 
 
-def execChunk(chunk, env, stdinData=None):
+def execChunk(chunk, env, stdinData=None, checkAllCmds=True):
     pipedCmds = splitByPipes(chunk)
     if not pipedCmds:
         return 1, None, "", "Empty pipeline\n"
@@ -499,7 +494,7 @@ def execChunk(chunk, env, stdinData=None):
                 stdinData = out
                 continue
 
-        if cmdName not in allCmds():
+        if checkAllCmds and cmdName not in allCmds():
             return None
 
         full_cmd = [cmdName] + args
@@ -567,12 +562,9 @@ def main():
     env = os.environ.copy()
     allCmds.env = env
     readline.set_completer(completer)
-    """
-    # fix, unsupported on windows
     readline.set_completion_display_matches_hook(
         customDisplay
-    )  
-    """
+    )  # fix, unsupported on windows
     readline.parse_and_bind("tab: complete")
     try:
         readHistory(env)
@@ -582,6 +574,7 @@ def main():
     while True:
 
         try:
+            # _stdin = input("$ ")  # fix add multiline support
             _stdin = readMultilineInput()
             if not _stdin.strip():
                 continue
