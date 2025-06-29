@@ -184,11 +184,14 @@ def getWindowsCmdlets(env=None):
     )
     command = f'powershell -Command "{powershell_cmd}"'
 
-    # Use execPipeline to run command natively
-    code, _, out, err = execPipeline(splitByPipes(command), env or os.environ)
-
-    if code == 0:
-        for line in out.splitlines():
+    result = subprocess.run(
+        ["powershell", "-Command", powershell_cmd],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
             line = line.strip()
             if line:
                 cmdlets.add(line)
