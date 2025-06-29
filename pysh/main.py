@@ -3,6 +3,7 @@
 
 import os
 import readline
+import subprocess
 
 
 def _exit(code, env):
@@ -23,6 +24,8 @@ def save(data, file, mode):
 
 
 def _out(_stdout, out, err):
+    out = "" if out is None else out
+    err = "" if err is None else err
     ret = out + err
     if not _stdout:
         return ret
@@ -70,7 +73,7 @@ def cd(args):
         os.chdir(os.path.expanduser(path))
         return "", ""
     except Exception as e:
-        return "", f"cd: {args[0]}: No such file or directory"
+        return "", f"cd: {args[0]}: No such file or directory\n"
 
 
 def parseRedirection(args):
@@ -88,7 +91,7 @@ def parseRedirection(args):
             "2>|",
             "2>>",
             "&>",
-        ]:  # fix with regex
+        ]:
             return args[:i], (args[i], args[i + 1])
     return args, None
 
@@ -173,28 +176,23 @@ def tokenize(s):
     return result
 
 
-def getWindowsCmdlets():
+def getWindowsCmdlets(env=None):
     cmdlets = set()
-    try:
-        import subprocess
+    powershell_cmd = (
+        "Get-Command | Select-Object -ExpandProperty Name; "
+        "Get-Alias | Select-Object -ExpandProperty Name"
+    )
+    command = f'powershell -Command "{powershell_cmd}"'
 
-        result = subprocess.run(
-            [
-                "powershell",
-                "-Command",
-                "Get-Command | Select-Object -ExpandProperty Name; "
-                "Get-Alias | Select-Object -ExpandProperty Name",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line:
-                    cmdlets.add(line)
-    except Exception:
-        pass
+    # Use execPipeline to run command natively
+    code, _, out, err = execPipeline(splitByPipes(command), env or os.environ)
+
+    if code == 0:
+        for line in out.splitlines():
+            line = line.strip()
+            if line:
+                cmdlets.add(line)
+
     return cmdlets
 
 
@@ -229,22 +227,6 @@ def customDisplay(substitution, matches, longest_match_length):
     print(" ".join(matches))
     prompt = "$ " + readline.get_line_buffer()
     print(prompt, end="", flush=True)
-
-
-"""
-def fileSize(paths):
-    result = 0
-    if not paths:
-        return result
-    for path in paths:
-        try:
-            result += os.path.getsize(
-                os.path.expanduser(path) if path.startswith("~") else path
-            )
-        except:
-            continue
-    return result
-"""
 
 
 def readMultilineInput(prompt="$ "):
@@ -354,44 +336,34 @@ def splitLogicalOps(cmdLine):
     return result
 
 
-def splitCmds(s, sep):
+def splitByPipes(s):
     parts = []
-    buf = []
-    in_quotes = False
-    for char in s:
-        if char == '"':
-            in_quotes = not in_quotes
-            buf.append(char)
-        elif char == sep and not in_quotes:
-            parts.append("".join(buf))
-            buf = []
+    buf = ""
+    quote = None
+    escape = False
+
+    for i, c in enumerate(s):
+        if escape:
+            buf += c
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            buf += c
+            continue
+        if c in {"'", '"'}:
+            if quote == c:
+                quote = None
+            elif not quote:
+                quote = c
+        if c == "|" and not quote:
+            parts.append(buf)
+            buf = ""
         else:
-            buf.append(char)
-    parts.append("".join(buf))
+            buf += c
+    if buf:
+        parts.append(buf)
     return parts
-
-
-def groupCmds(s, sep):
-    result = []
-    rawPipe = ""
-    for cmd in splitCmds(s, sep):
-        if cmd.split()[0] in builtins():
-            if rawPipe:
-                result.append(rawPipe)
-                rawPipe = ""
-            result.append(cmd)
-        else:
-            rawPipe += sep + cmd if rawPipe else cmd
-    if rawPipe:
-        result.append(rawPipe)
-    return result
-
-
-"""
-fix
-function to split logical operators && ||
-def splitLogicalOps 
-"""
 
 
 def _history(args, env):
@@ -478,7 +450,7 @@ def substituteVars(cmd, env):
                 while j < len(cmd) and (cmd[j].isalnum() or cmd[j] == "_"):
                     varName += cmd[j]
                     j += 1
-                result += env.get(varName, "")
+                result += str(env.get(varName, ""))  # Only string concats
                 i = j
         else:
             result += cmd[i]
@@ -486,41 +458,84 @@ def substituteVars(cmd, env):
     return result
 
 
-def handleQuotes(args):
-    fullCmd = ""
-    if os.name == "nt":
-        fullCmd = "powershell "
-    for arg in args:
-        if len(arg.split()) > 1 and " | " not in arg:
-            fullCmd += f" '{arg}'"
+def execChunk(chunk, env, stdinData=None):
+    pipedCmds = splitByPipes(chunk)
+    if not pipedCmds:
+        return 1, None, "", "Empty pipeline\n"
+
+    processes = []
+    prevStdout = subprocess.PIPE
+    finalStdout = None
+    redir = None
+
+    for i, cmd in enumerate(pipedCmds):
+        tokens = tokenize(substituteVars(cmd.strip(), env))
+        if not tokens:
+            return 1, None, "", "Empty command\n"
+
+        cmdName = tokens[0]
+        args, redir = parseRedirection(tokens[1:])
+        isLast = i == len(pipedCmds) - 1
+
+        # Check if the command is a builtin
+        if cmdName in builtins():
+            if isLast:
+                # Last command, execute builtin and return
+                for proc in processes[:-1]:
+                    proc.wait()
+                if processes:
+                    prevOutput, prevError = processes[-1].communicate(stdinData)
+                else:
+                    prevOutput = stdinData or ""
+                    prevError = ""
+                out, err = builtins(None, env)[cmdName](args)
+                return 0, redir, out, err
+            else:
+                # Not the last command, execute builtin and continue
+                out, err = builtins(None, env)[cmdName](args)
+                stdinData = out
+                continue
+
+        if cmdName not in allCmds():
+            return None
+
+        full_cmd = [cmdName] + args
+        if os.name == "nt":
+            full_cmd = ["powershell", "-Command"] + full_cmd
+
+        proc = subprocess.Popen(
+            full_cmd,
+            stdin=prevStdout,
+            # Last command, in a Pipeline print to terminal
+            stdout=None if isLast and i else subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={k: str(v) for k, v in env.items()},
+            text=True,
+            bufsize=1,
+        )
+
+        if prevStdout and prevStdout != subprocess.PIPE:
+            prevStdout.close()
+
+        processes.append(proc)
+        prevStdout = proc.stdout
+
+    # Collect final output and error (only from last process)
+    if processes:
+        if stdinData is not None:
+            finalOut, finalErr = processes[-1].communicate(stdinData)
         else:
-            fullCmd += f" {arg}"
-    return fullCmd
+            finalOut, finalErr = processes[-1].communicate()
+        exitCode = processes[-1].returncode
+    else:
+        finalOut, finalErr = "", ""
+        exitCode = 0
 
+    # Wait for all others to finish
+    for proc in processes[:-1]:
+        proc.wait()
 
-def execSh(_stdin, env=None, pipe=""):
-    # _stdin = _stdin.replace("tail -f", "tail")
-    command, *args = tokenize(substituteVars(_stdin, env))
-    args, _stdout = parseRedirection(args)
-    if command in builtins():
-        result = builtins(_stdout, env)[command](args)
-        exitCode = 0 if result[-1] == "" else 1
-        return exitCode, _stdout, *result
-        # return builtins(_stdout)[command](args + tokenize(pipe) if pipe else args)
-    if command not in allCmds():
-        return None
-    prefix = f"echo '{pipe}' | " if pipe else ""
-    homeDir = os.path.expanduser("~")
-    errLog = os.path.join(homeDir, ".stderr.log")
-    outLog = os.path.join(homeDir, ".stdout.log")
-    # size = fileSize(args)
-    cmd = f"{prefix} {handleQuotes((command, *args))} 2>{errLog} >{outLog}"
-    exitCode = os.system(cmd)
-    with open(outLog, "r") as f:
-        out = f.read()
-    with open(errLog, "r") as f:
-        err = f.read()
-    return exitCode, _stdout, out, err
+    return exitCode, redir, finalOut, finalErr
 
 
 def execPython(_stdin, env):
@@ -549,7 +564,12 @@ def main():
     env = os.environ.copy()
     allCmds.env = env
     readline.set_completer(completer)
-    # readline.set_completion_display_matches_hook(customDisplay)  # fix, unsupported on windows
+    """
+    # fix, unsupported on windows
+    readline.set_completion_display_matches_hook(
+        customDisplay
+    )  
+    """
     readline.parse_and_bind("tab: complete")
     try:
         readHistory(env)
@@ -559,7 +579,6 @@ def main():
     while True:
 
         try:
-            # _stdin = input("$ ")  # fix add multiline support
             _stdin = readMultilineInput()
             if not _stdin.strip():
                 continue
@@ -573,46 +592,31 @@ def main():
         try:
             runNext = True
 
-            for i, (chunk, op) in enumerate(splitLogicalOps(_stdin)):
+            for chunk, op in splitLogicalOps(_stdin):
                 if not runNext:
                     if op == "&":
-                        continue  # background, no-op
-                    else:
-                        break
+                        continue
+                    break
 
-                outList = []
-                for j, cmd in enumerate(groupCmds(chunk, "|")):
-                    if not outList:
-                        out = execSh(cmd, env)
-                    elif outList[-1] is None:
-                        break
-                    else:
-                        out = execSh(cmd, env, outList[-1])
-                    outList.append(_out(*out[1:]) if out else None)
+                out = execChunk(chunk, env)
+                output = _out(*out[1:]) if out else None
 
-                # Print output of last command
-                if outList and outList[-1] is not None:
-                    lastOut = outList[-1][:-1]
-                    if lastOut:
-                        print(lastOut)
+                if output and output[:-1]:
+                    print(output[:-1])
 
-                if out is not None:
-                    success = not out[0]
-                else:
-                    success = False
+                success = out is not None and out[0] == 0
 
-                # Handle logic
                 if op == "&&":
                     runNext = success
                 elif op == "||":
                     runNext = not success
                 elif op == "&":
-                    runNext = True
+                    runNext = True  # Background: do not block
 
             if out is not None:
-                continue  # skip Python
+                continue  # Skip Python
 
-        except Exception as e:
+        except (Exception, KeyboardInterrupt) as e:
             print(e)
             continue
 
