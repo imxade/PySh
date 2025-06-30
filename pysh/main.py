@@ -46,7 +46,7 @@ def findExe(arg, env):
     for path in allCmds.env.get("PATH", "").split(os.pathsep):
         binPath = os.path.join(path, arg)
         if os.access(binPath, os.X_OK):
-            # Only first path # fix
+            # fix Only first path
             return binPath
 
 
@@ -392,11 +392,11 @@ def _history(args, env):
 
 
 def historyRange(start, end):
-    result = ""
+    result = []
     for i in range(start + 1, end + 1):
         cmd = readline.get_history_item(i)
-        result += f"    {i}  {cmd}\n" if cmd else ""
-    return result, ""
+        result.append(f"    {i}  {cmd}" if cmd else "")
+    return "\n".join(result) + "\n", ""
 
 
 def readHistory(env, file=None):
@@ -468,7 +468,6 @@ def execChunk(chunk, env, stdinData=None):
 
     processes = []
     prevStdout = subprocess.PIPE
-    finalStdout = None
     redir = None
 
     for i, cmd in enumerate(pipedCmds):
@@ -480,23 +479,16 @@ def execChunk(chunk, env, stdinData=None):
         args, redir = parseRedirection(tokens[1:])
         isLast = i == len(pipedCmds) - 1
 
-        # Check if the command is a builtin
         if cmdName in builtins():
             if isLast:
-                # Last command, execute builtin and return
                 for proc in processes[:-1]:
                     proc.wait()
-                if processes:
-                    prevOutput, prevError = processes[-1].communicate(stdinData)
-                else:
-                    prevOutput = stdinData or ""
-                    prevError = ""
-                out, err = builtins(None, env)[cmdName](args)
-                return 0, redir, out, err
+                out, err = builtins(redir, env)[cmdName](args)
+                code = 0 if err == "" else 1
+                yield code, redir, out, err
+                return
             else:
-                # Not the last command, execute builtin and continue
-                out, err = builtins(None, env)[cmdName](args)
-                stdinData = out
+                stdinData, err = builtins(redir, env)[cmdName](args)
                 continue
 
         if cmdName not in allCmds():
@@ -509,36 +501,44 @@ def execChunk(chunk, env, stdinData=None):
         proc = subprocess.Popen(
             full_cmd,
             stdin=prevStdout,
-            # Last command, in a Pipeline print to terminal
-            stdout=None if isLast and i else subprocess.PIPE,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env={k: str(v) for k, v in env.items()},
             text=True,
             bufsize=1,
         )
 
-        if prevStdout and prevStdout != subprocess.PIPE:
-            prevStdout.close()
-
         processes.append(proc)
         prevStdout = proc.stdout
 
-    # Collect final output and error (only from last process)
-    if processes:
-        if stdinData is not None:
-            finalOut, finalErr = processes[-1].communicate(stdinData)
-        else:
-            finalOut, finalErr = processes[-1].communicate()
-        exitCode = processes[-1].returncode
-    else:
-        finalOut, finalErr = "", ""
-        exitCode = 0
+    if stdinData is not None:
+        processes[0].stdin.write(stdinData)
+        processes[0].stdin.close()
+    stdinData = None
 
-    # Wait for all others to finish
+    # Stream stdout line-by-line from last process
+    lastProc = processes[-1]
+    if stdinData is not None:
+        lastProc.stdin.write(stdinData)
+        lastProc.stdin.close()
+    try:
+        for line in lastProc.stdout:
+            yield None, redir, line, ""
+            if redir and ">>" not in redir[0]:
+                redir = redir[0].replace(">", ">>", 1), redir[1]
+    finally:
+        lastProc.stdout.close()
+
+    # Get final exit code and stderr
+    finalErr = lastProc.stderr.read()
+    lastProc.stderr.close()
+    exitCode = lastProc.wait()
+
+    # Wait for others
     for proc in processes[:-1]:
         proc.wait()
 
-    return exitCode, redir, finalOut, finalErr
+    yield exitCode, redir, "", finalErr
 
 
 def execPython(_stdin, env):
@@ -567,13 +567,12 @@ def main():
     env = os.environ.copy()
     allCmds.env = env
     readline.set_completer(completer)
-    """
-    # fix, unsupported on windows
-    readline.set_completion_display_matches_hook(
-        customDisplay
-    )  
-    """
     readline.parse_and_bind("tab: complete")
+    try:
+        readline.set_completion_display_matches_hook(customDisplay)
+    except AttributeError:
+        pass  # Not supported on Windows
+
     try:
         readHistory(env)
     except:
@@ -594,6 +593,7 @@ def main():
 
         try:
             runNext = True
+            exitCode = None
 
             for chunk, op in splitLogicalOps(_stdin):
                 if not runNext:
@@ -601,13 +601,13 @@ def main():
                         continue
                     break
 
-                out = execChunk(chunk, env)
-                output = _out(*out[1:]) if out else None
+                for code, redir, out, err in execChunk(chunk, env):
+                    shellOut = _out(redir, out, err)
+                    if shellOut != "":
+                        print(shellOut[:-1])
+                    exitCode = code
 
-                if output and output[:-1]:
-                    print(output[:-1])
-
-                success = out is not None and out[0] == 0
+                success = exitCode == 0
 
                 if op == "&&":
                     runNext = success
@@ -616,10 +616,10 @@ def main():
                 elif op == "&":
                     runNext = True  # Background: do not block
 
-            if out is not None:
+            if exitCode is not None:
                 continue  # Skip Python
 
-        except (Exception, KeyboardInterrupt) as e:
+        except KeyboardInterrupt as e:
             print(e)
             continue
 
